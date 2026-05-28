@@ -1097,9 +1097,8 @@
             <div class="toggle" id="toggle-sheets" onclick="toggleConfig('sheets')" title="คลิกเพื่อเปิด/ปิด"></div>
           </div>
           <div id="sheets-config" style="display:none;padding:10px 0 0 48px">
-            <div class="form-group"><label>Spreadsheet ID</label><input id="cfg-sheet-id" type="text" placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"></div>
-            <div class="form-group" style="margin-top:8px"><label>API Key</label><input id="cfg-sheet-key" type="password" placeholder="AIza..."></div>
-            <div style="margin-top:8px;font-size:11px;color:var(--muted)">⚠️ ใช้ Service Account สำหรับ production จริง</div>
+            <div class="form-group"><label>Apps Script Web App URL</label><input id="cfg-script-url" type="text" placeholder="https://script.google.com/macros/s/..."></div>
+            <div style="margin-top:8px;font-size:11px;color:var(--muted)">✅ ได้จาก Google Apps Script → Deploy → Web app URL</div>
           </div>
           <div class="config-row">
             <div class="config-icon green">💾</div>
@@ -1230,7 +1229,6 @@ function init() {
 
 function saveData() {
   localStorage.setItem('accflow_data', JSON.stringify(APP.data));
-  syncToSheets();
   backupToGitHub();
 }
 
@@ -1242,8 +1240,7 @@ function saveConfig() {
   APP.config.email    = document.getElementById('cfg-email').value;
   APP.config.vat      = +document.getElementById('cfg-vat').value || 7;
   APP.config.qtPrefix = document.getElementById('cfg-qt-prefix').value || 'QT';
-  APP.config.sheetId  = document.getElementById('cfg-sheet-id')?.value || '';
-  APP.config.sheetKey = document.getElementById('cfg-sheet-key')?.value || '';
+  APP.config.scriptUrl = document.getElementById('cfg-script-url')?.value || '';
   APP.config.ghToken  = document.getElementById('cfg-gh-token')?.value || '';
   APP.config.ghRepo   = document.getElementById('cfg-gh-repo')?.value || '';
   localStorage.setItem('accflow_config', JSON.stringify(APP.config));
@@ -1259,7 +1256,7 @@ function loadConfig() {
   if (s('cfg-phone')   && c.phone)    s('cfg-phone').value   = c.phone;
   if (s('cfg-email')   && c.email)    s('cfg-email').value   = c.email;
   if (s('cfg-vat'))    s('cfg-vat').value = c.vat || 7;
-  if (s('cfg-sheet-id') && c.sheetId) s('cfg-sheet-id').value = c.sheetId;
+  if (s('cfg-script-url') && c.scriptUrl) s('cfg-script-url').value = c.scriptUrl;
   if (s('cfg-gh-repo')  && c.ghRepo)  s('cfg-gh-repo').value  = c.ghRepo;
 }
 
@@ -1654,7 +1651,9 @@ function saveDocument() {
     toast('เพิ่มเอกสารเรียบร้อย', 'success');
   }
 
-  saveData();
+  localStorage.setItem('accflow_data', JSON.stringify(APP.data));
+  syncToSheets({ type, doc });
+  backupToGitHub();
   updateBadges();
   renderDocPage(type);
   renderDashboard();
@@ -1817,42 +1816,51 @@ function updateBadges() {
 }
 
 // ==================== GOOGLE SHEETS ====================
-async function syncToSheets() {
-  if (!APP.config.toggleSheets || !APP.config.sheetId || !APP.config.sheetKey) return;
+async function syncToSheets(singleDoc) {
+  if (!APP.config.toggleSheets || !APP.config.scriptUrl) return;
   setSyncStatus('กำลัง sync...', false);
   try {
-    const all = [];
-    Object.entries(APP.data).forEach(([type, docs]) => {
-      docs.forEach(d => {
-        all.push([
-          d.docNo||'', APP.docTypes[type]?.label||type, d.date||'',
-          d.customer||d.supplier||d.description||d.payee||'',
-          d.total||d.amount||d.whtAmount||0, d.status||'', new Date().toISOString()
-        ]);
-      });
-    });
-
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${APP.config.sheetId}/values/Sheet1:append?valueInputOption=RAW&key=${APP.config.sheetKey}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ values: all })
-    });
-    if (response.ok) {
-      setSyncStatus('Sync แล้ว ✓', true);
-      toast('Sync Google Sheets เรียบร้อย', 'success');
+    const rows = [];
+    if (singleDoc) {
+      const { type, doc } = singleDoc;
+      rows.push([
+        doc.docNo||'', APP.docTypes[type]?.label||type, doc.date||'',
+        doc.customer||doc.supplier||doc.description||doc.payee||'',
+        doc.total||doc.amount||doc.whtAmount||0, doc.status||'', new Date().toISOString()
+      ]);
     } else {
-      throw new Error('HTTP ' + response.status);
+      Object.entries(APP.data).forEach(([type, docs]) => {
+        docs.forEach(d => {
+          rows.push([
+            d.docNo||'', APP.docTypes[type]?.label||type, d.date||'',
+            d.customer||d.supplier||d.description||d.payee||'',
+            d.total||d.amount||d.whtAmount||0, d.status||'', new Date().toISOString()
+          ]);
+        });
+      });
+    }
+
+    const response = await fetch(APP.config.scriptUrl, {
+      method: 'POST',
+      body: JSON.stringify({ rows })
+    });
+    const text = await response.text();
+    if (text === 'OK' || response.ok) {
+      setSyncStatus('Sync แล้ว ✓', true);
+      toast('Sync Google Sheets เรียบร้อย ✅', 'success');
+    } else {
+      throw new Error(text);
     }
   } catch (e) {
     setSyncStatus('Sync ล้มเหลว', true);
     console.warn('Sheets sync error:', e);
+    toast('Sync Sheets ล้มเหลว: ' + e.message, 'error');
   }
 }
 
 async function exportToSheets(type) {
-  if (!APP.config.sheetId) {
-    toast('กรุณาตั้งค่า Google Sheets ก่อน', 'error'); return;
+  if (!APP.config.scriptUrl) {
+    toast('กรุณาตั้งค่า Apps Script URL ก่อน', 'error'); return;
   }
   await syncToSheets();
 }
